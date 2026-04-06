@@ -14,6 +14,8 @@ console = Console()
 
 class FreecampDevScanner:
     """FreecampDev API를 통한 서브도메인 스캐너"""
+
+    MAX_SUBDOMAINS = 10000
     
     def __init__(self, domain: str, silent: bool = False):
         """
@@ -25,6 +27,27 @@ class FreecampDevScanner:
         self.base_url = "https://freecamp.dev/api/tools/network/subdomains/"
         self.subdomains = set()
         self.silent = silent
+
+    def _parse_results(self, json_content: str) -> Set[str]:
+        """응답 JSON에서 유효한 서브도메인만 추출한다."""
+        data = json.loads(json_content)
+        results = data.get("results", [])
+        found_subdomains = set()
+
+        for result in results:
+            subdomain = result.get("subdomain", "")
+            if subdomain and subdomain.endswith(f".{self.domain}"):
+                found_subdomains.add(subdomain.lower())
+
+        if len(found_subdomains) > self.MAX_SUBDOMAINS:
+            if not self.silent:
+                console.print(
+                    f"[yellow][!][/] FreecampDev 결과 {len(found_subdomains)}개 감지: "
+                    f"{self.MAX_SUBDOMAINS}개 초과로 FP로 판단하고 건너뜁니다"
+                )
+            return set()
+
+        return found_subdomains
         
     async def scan(self) -> Set[str]:
         """
@@ -48,14 +71,7 @@ class FreecampDevScanner:
                     
                     # JSON 파싱
                     try:
-                        data = json.loads(json_content)
-                        results = data.get("results", [])
-                        
-                        # 결과 처리
-                        for result in results:
-                            subdomain = result.get("subdomain", "")
-                            if subdomain and subdomain.endswith(f".{self.domain}"):
-                                self.subdomains.add(subdomain.lower())
+                        self.subdomains = self._parse_results(json_content)
                     except json.JSONDecodeError as e:
                         if not self.silent:
                             console.print(f"[bold red][-][/] JSON 파싱 오류: {str(e)}")
