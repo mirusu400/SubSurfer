@@ -6,13 +6,25 @@
 import asyncio
 import aiohttp
 from typing import Dict, Set, List, Tuple, Optional
-from Wappalyzer import Wappalyzer, WebPage
 import random
 from rich.console import Console
 import warnings
 import socket
-# Wappalyzer 경고 무시
-warnings.filterwarnings('ignore', module='Wappalyzer')
+
+# Wappalyzer 로드 시도
+try:
+    warnings.filterwarnings('ignore', module='Wappalyzer')
+    from Wappalyzer import Wappalyzer, WebPage
+    HAS_WAPPALYZER = True
+except Exception:
+    HAS_WAPPALYZER = False
+
+# Wappalyzer 사용 불가 시 webtech fallback
+try:
+    import webtech
+    HAS_WEBTECH = True
+except Exception:
+    HAS_WEBTECH = False
 console = Console()
 class WebScanner:
     """웹 서비스 스캐너"""
@@ -30,7 +42,12 @@ class WebScanner:
         self.default_ports = [80, 443]  # 기본 포트는 별도 저장
         self.verbose = verbose  # verbose 저장
         self.silent = silent  # silent 모드 저장
-        self.wappalyzer = Wappalyzer.latest()
+        self.wappalyzer = None
+        if HAS_WAPPALYZER:
+            try:
+                self.wappalyzer = Wappalyzer.latest()
+            except Exception:
+                pass
         self.user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
@@ -60,28 +77,69 @@ class WebScanner:
         """웹 서버 여부 확인"""
         headers = {'User-Agent': self._get_random_user_agent()}
         protocols = ['https', 'http']
-        
+
         for protocol in protocols:
             url = f"{protocol}://{subdomain}"
             if port and port not in [80, 443]:
                 url = f"{url}:{port}"
-                
-            try:
-                webpage = await WebPage.new_from_url_async(
-                    url, 
-                    verify=False, 
-                    timeout=2,
-                    aiohttp_client_session=self.session
-                )
-                analysis = self.wappalyzer.analyze_with_versions_and_categories(webpage)
-                if port:  # 포트 스캔 결과 저장
-                    self.all_urls[subdomain] = self.all_urls.get(subdomain, [])
-                    self.all_urls[subdomain].append((url, port))
-                return True, url, analysis
-            except:
-                continue
-                
+
+            # Wappalyzer 우선 시도
+            if self.wappalyzer:
+                try:
+                    webpage = await WebPage.new_from_url_async(
+                        url,
+                        verify=False,
+                        timeout=2,
+                        aiohttp_client_session=self.session
+                    )
+                    analysis = self.wappalyzer.analyze_with_versions_and_categories(webpage)
+                    if port:
+                        self.all_urls[subdomain] = self.all_urls.get(subdomain, [])
+                        self.all_urls[subdomain].append((url, port))
+                    return True, url, analysis
+                except:
+                    pass
+
+            # Wappalyzer 사용 불가 또는 실패 시 webtech fallback
+            if HAS_WEBTECH:
+                try:
+                    wt = webtech.WebTech(options={'json': True})
+                    report = wt.start_from_url(url)
+                    analysis = self._parse_webtech_report(report)
+                    if port:
+                        self.all_urls[subdomain] = self.all_urls.get(subdomain, [])
+                        self.all_urls[subdomain].append((url, port))
+                    return True, url, analysis
+                except:
+                    pass
+
+            # Wappalyzer, webtech 모두 사용 불가 시 HTTP 연결 여부만 확인
+            if not self.wappalyzer and not HAS_WEBTECH:
+                try:
+                    async with self.session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=2), ssl=False) as resp:
+                        if resp.status:
+                            if port:
+                                self.all_urls[subdomain] = self.all_urls.get(subdomain, [])
+                                self.all_urls[subdomain].append((url, port))
+                            return True, url, {}
+                except:
+                    pass
+
         return False, "", {}
+
+    def _parse_webtech_report(self, report: dict) -> Dict:
+        """webtech 결과를 Wappalyzer 형식으로 변환"""
+        analysis = {}
+        if isinstance(report, dict) and 'tech' in report:
+            for tech in report['tech']:
+                name = tech.get('name', '')
+                version = tech.get('version', None)
+                if name:
+                    analysis[name] = {
+                        'versions': [version] if version else [],
+                        'categories': []
+                    }
+        return analysis
         
     def _is_host_active(self, subdomain: str) -> bool:
         """호스트 활성화 여부 확인"""
